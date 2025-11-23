@@ -7,6 +7,7 @@ from scipy.ndimage import binary_dilation, distance_transform_edt
 import matplotlib.pyplot as plt
 from skimage.transform import resize
 import pandas as pd
+import cairo
 
 
 def generate_new_color(existing_colors, seed=None):
@@ -22,48 +23,75 @@ def generate_new_color(existing_colors, seed=None):
             return new_color
 
 
-def draw_bacteria_on_array(bacteria, colors, array, x_min_val, y_min_val, min_length=1, min_width=1, margin=50):
+def capsule_path(canvas, l, r):
+    path = canvas.beginPath()
+    path.moveTo(-l / 2.0, -r)
+    path.lineTo(l / 2.0, -r)
+
+    path.arcTo(l / 2.0 - r, -r, l / 2.0 + r, r, -90, 180)
+
+    path.lineTo(-l / 2.0, r)
+    path.arc(-l / 2.0 - r, -r, -l / 2.0 + r, r, 90, 180)
+    # path.close()
+    return path
+
+
+def draw_capsule(ctx, p, d, l, r, color):
+    """
+    CellModeller-accurate capsule drawing using Cairo.
+    p = (x,y) position FLOAT
+    d = (dx,dy) direction FLOAT (unit vector)
+    l = length
+    r = half-width (radius)
+    color = (R,G,B) 0–255
+    """
+
+    # Convert color to Cairo 0–1 range
+    R, G, B = [c / 255.0 for c in color]
+    ctx.save()
+
+    # Move origin to p
+    ctx.translate(p[0], p[1])
+
+    # Rotate to align with direction vector
+    angle = np.degrees(np.atan2(d[1], d[0]))
+    ctx.rotate(np.radians(angle))
+
+    # Begin path
+    ctx.new_path()
+
+    # Rectangle part around centerline
+    ctx.move_to(-l / 2, -r)
+    ctx.line_to(l / 2, -r)
+    ctx.arc(l / 2, 0, r, -np.pi / 2, np.pi / 2)  # right cap
+    ctx.line_to(-l / 2, r)
+    ctx.arc(-l / 2, 0, r, np.pi / 2, -np.pi / 2)  # left cap
+
+    # Fill
+    ctx.set_source_rgb(R, G, B)
+    ctx.fill()
+
+    ctx.restore()
+
+
+def draw_bacteria_on_array(sel_time_point_df, colors, ctx, x_min_val, y_min_val, margin=50):
     """
     Draw the bacteria on a numpy array (image) using given colors.
     """
-    for idx, bacterium in enumerate(bacteria):
-        center, direction, length, width, endpoint1, endpoint2 = (
-            bacterium['center'], bacterium['direction'], bacterium['length'], bacterium['width'],
-            bacterium['endpoint1'], bacterium['endpoint2'])
-
-        # Ensure minimum values for length and width
-        length = max(length, min_length)
-        width = max(width, min_width)
+    for idx, bacterium in sel_time_point_df.iterrows():
+        p = np.array([bacterium['Location_Center_X'], bacterium['Location_Center_Y']])
+        bac_orientation = bacterium['AreaShape_Orientation']
+        bac_orientation = -(bac_orientation + 90) * np.pi / 180
+        d = np.array([np.cos(bac_orientation), np.sin(bac_orientation)])
+        l = bacterium['AreaShape_MajorAxisLength']
+        r = bacterium['AreaShape_MinorAxisLength']
 
         # Adjust the endpoints based on minimum x and y values and a margin
-        endpoint1[0] = endpoint1[0] - x_min_val + margin
-        endpoint2[0] = endpoint2[0] - x_min_val + margin
-        endpoint1[1] = endpoint1[1] - y_min_val + margin
-        endpoint2[1] = endpoint2[1] - y_min_val + margin
+        p[0] = p[0] - x_min_val + margin
+        p[1] = p[1] - y_min_val + margin
 
-        # Calculate the perpendicular direction for the width of the bacterium
-        perpendicular = np.array([-direction[1], direction[0]])
-
-        # Ensure the endpoints are within image bounds
-        endpoint1 = np.maximum(endpoint1, 0).astype(int)
-        endpoint2 = np.maximum(endpoint2, 0).astype(int)
-
-        # Define the points that form the shape of the bacterium
-        points = np.array([
-            endpoint1 - width / 2 * perpendicular,
-            endpoint1 + width / 2 * perpendicular,
-            endpoint2 + width / 2 * perpendicular,
-            endpoint2 - width / 2 * perpendicular
-        ], dtype=np.int32)
-
-        # Draw the bacterium polygon on the array using the corresponding color
         color = tuple(int(c) for c in colors[idx])  # Ensure color is a tuple of integers
-        cv2.fillPoly(array, [points], color=color)
-
-        # Draw semi-circles at the endpoints to complete the bacterium shape
-        if width > 0:
-            cv2.ellipse(array, tuple(endpoint1), (int(width / 2), int(width / 2)), 0, 0, 360, color, -1)
-            cv2.ellipse(array, tuple(endpoint2), (int(width / 2), int(width / 2)), 0, 0, 360, color, -1)
+        draw_capsule(ctx, p, d, l, r, color)
 
 
 def downscale_image(image_array, scale_factor):
@@ -124,43 +152,77 @@ def fast_expand_labels(labeled_array):
     return expanded_labels
 
 
-def find_neighbors(bacteria, time, rows, margin=50):
+def create_cairo_surface(width, height):
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+    ctx = cairo.Context(surface)
+
+    # Disable antialiasing → crucial for exact RGB matching
+    ctx.set_antialias(cairo.ANTIALIAS_NONE)
+
+    # White background
+    ctx.set_source_rgb(0, 0, 0)
+    ctx.paint()
+
+    # Create NumPy view
+    buf = surface.get_data()
+    img = np.ndarray(shape=(height, width, 4),
+                     dtype=np.uint8,
+                     buffer=buf)
+
+    return surface, ctx, img
+
+
+def cairo_to_rgb(image):
+    # image is BGRA (Cairo order)
+    b = image[:, :, 0]
+    g = image[:, :, 1]
+    r = image[:, :, 2]
+    rgb = np.stack([r, g, b], axis=2)
+    return rgb
+
+
+def find_neighbors(sel_time_point_df, time, rows, margin=50):
     # List to hold the rows of the dataframe
 
     # Generate unique colors for each bacterium
     existing_colors = np.array([[0, 0, 0]])
     colors = []
-    for _ in range(len(bacteria)):
+    for _ in range(sel_time_point_df.shape[0]):
         new_color = generate_new_color(existing_colors)
         colors.append(new_color)
         existing_colors = np.vstack([existing_colors, new_color])
 
     # Determine the minimum and maximum x and y values
-    x_min_val = min(
-        [bacterium['endpoint1'][0] for bacterium in bacteria] + [bacterium['endpoint2'][0] for bacterium in
-                                                                 bacteria])
-    y_min_val = min(
-        [bacterium['endpoint1'][1] for bacterium in bacteria] + [bacterium['endpoint2'][1] for bacterium in
-                                                                 bacteria])
+    x_min_val = min(sel_time_point_df['Node_x1_x'].min(), sel_time_point_df['Node_x2_x'].min())
+    y_min_val = min(sel_time_point_df['Node_x1_y'].min(), sel_time_point_df['Node_x2_y'].min())
 
-    max_x = max([bacterium['endpoint1'][0] for bacterium in bacteria] + [bacterium['endpoint2'][0] for bacterium in
-                                                                         bacteria])
-    max_y = max([bacterium['endpoint1'][1] for bacterium in bacteria] + [bacterium['endpoint2'][1] for bacterium in
-                                                                         bacteria])
+    max_x = max(sel_time_point_df['Node_x1_x'].max(), sel_time_point_df['Node_x2_x'].max())
+    max_y = max(sel_time_point_df['Node_x1_y'].max(), sel_time_point_df['Node_x2_y'].max())
 
     # Calculate the dimensions of the image
     image_width = int(max_x - x_min_val + 2 * margin)
     image_height = int(max_y - y_min_val + 2 * margin)
-    image_shape = (image_height + 400, image_width + 400, 3)
-
-    # Initialize a blank image array
-    image_array = np.zeros(image_shape, dtype=np.uint8)
+    surface, ctx, image = create_cairo_surface(image_width, image_height)
 
     # Draw bacteria on the image array using their assigned colors
-    draw_bacteria_on_array(bacteria, colors, image_array, x_min_val, y_min_val, margin=margin)
+    draw_bacteria_on_array(sel_time_point_df, colors, ctx, x_min_val, y_min_val, margin=margin)
+    image_array = cairo_to_rgb(image)
+    image_array_corrected = np.flipud(image_array)
+
+    # plt.figure(figsize=(8, 8))
+    # plt.imshow(image_array_corrected)
+    # plt.axis('off')
+    # plt.title("Rendered Bacteria Capsules")
+    # plt.savefig(f"img/{time}.jpg", dpi=600)
+    # plt.close()
+    # breakpoint()
 
     # Efficiently label the image based on unique colors using downscaling
     labeled_array = fast_color_to_label(image_array, colors)
+    # print("Any labels?", np.any(labeled_array))
+    # unique_colors = np.unique(image_array.reshape(-1, 3), axis=0)
+    # print(unique_colors)
+    # breakpoint()
 
     # Expand the labels until they touch
     expanded_labels = fast_expand_labels(labeled_array)
@@ -176,59 +238,49 @@ def find_neighbors(bacteria, time, rows, margin=50):
     expanded_image_array[mask] = colors_array[expanded_labels[mask] - 1]
 
     # Display the expanded objects together (commented out for script use)
-    # plt.imshow(expanded_rgb_image)
-    # plt.title('Expanded Bacteria Until Touch (RGB)')
+    # plt.figure(figsize=(8, 8))
+    # plt.imshow(expanded_image_array)
     # plt.axis('off')
+    # plt.title("Expanded Bacteria Coloring")
     # plt.show()
+    # breakpoint()
 
     # Identify and report neighboring objects by ID
-    id_map = {idx + 1: bacteria[idx]['id'] for idx in range(len(bacteria))}
+    id_map = {idx + 1: bacterium['id'] for idx, bacterium in sel_time_point_df.iterrows()}
     neighbors = {}
     for region in regionprops(expanded_labels):
         label_id = region.label
-        min_row, min_col, max_row, max_col = region.bbox
-        mask = expanded_labels[min_row:max_row, min_col:max_col] == label_id
-        expanded_mask = binary_dilation(mask)
-        neighboring_labels = np.unique(expanded_labels[min_row:max_row, min_col:max_col][expanded_mask])
-        neighboring_labels = neighboring_labels[neighboring_labels != 0]
-        neighboring_labels = neighboring_labels[neighboring_labels != label_id]
+
+        # Create full-sized mask for this label
+        region_mask = expanded_labels == label_id
+
+        # Dilate it to touch neighbors
+        expanded_mask = binary_dilation(region_mask)
+
+        # Find labels in the dilated region
+        neighboring_labels = np.unique(expanded_labels[expanded_mask])
+
+        # Remove background and self
+        neighboring_labels = neighboring_labels[(neighboring_labels != 0) & (neighboring_labels != label_id)]
+
         neighbors[id_map[label_id]] = [id_map[n] for n in neighboring_labels]
 
     # Print the neighboring objects by ID
     for bacterium_id, neighbor_list in neighbors.items():
         for neighbor_id in neighbor_list:
-            rows.append((time + 1, bacterium_id, neighbor_id))
+            rows.append((time, bacterium_id, neighbor_id))
 
     return rows
 
 
-def neighbor_finders(pickle_folder):
-
+def neighbor_finders(bacteria_properties_df):
     rows = []
 
-    for time, fname in enumerate(glob.glob(pickle_folder + '/*.pickle')):
+    for time_point in bacteria_properties_df['ImageNumber'].unique():
+        sel_time_point_df = bacteria_properties_df.loc[
+            bacteria_properties_df['ImageNumber'] == time_point].reset_index(drop=True)
 
-        bacteria = []
-
-        # Load the data from the pickle file
-        data = pickle.load(open(fname, 'rb'))
-        cs = data['cellStates']
-
-        x_vals = []
-        y_vals = []
-
-        # Extract relevant data from the cell states
-        for it in cs:
-            bacteria.append(
-                {'id': cs[it].id, 'center': np.array(cs[it].pos[:2]), 'direction': np.array(cs[it].dir[:2]),
-                 'length': cs[it].length / 0.0144, 'width': cs[it].radius / 0.0144,
-                 'endpoint1': cs[it].ends[0][:2] / 0.0144,
-                 'endpoint2': cs[it].ends[1][:2] / 0.0144}
-            )
-            x_vals.extend([cs[it].ends[0][0], cs[it].ends[1][0]])
-            y_vals.extend([cs[it].ends[0][1], cs[it].ends[1][1]])
-
-        rows = find_neighbors(bacteria, time, rows)
+        rows = find_neighbors(sel_time_point_df, time_point, rows)
 
     # Create a dataframe from the list of tuples
     df = pd.DataFrame(rows, columns=['Image Number', 'First Object id', 'Second Object id'])
