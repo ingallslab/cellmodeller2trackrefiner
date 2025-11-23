@@ -6,6 +6,93 @@ import pandas as pd
 import glob
 
 
+def reassign_id(dataframe, parent_image_number_col, parent_object_number_col):
+
+    dataframe['index'] = dataframe.index
+    dataframe['checked'] = False
+    dataframe["divideFlag"] = False
+    dataframe['id'] = np.nan
+    dataframe['LifeHistory'] = np.nan
+    dataframe['CellAge'] = np.nan
+
+    cond1 = dataframe[parent_image_number_col] == 0
+    cond2 = dataframe['ImageNumber'] > 1
+    cond3 = dataframe['ImageNumber'] == 1
+
+    dataframe.loc[cond1 & cond2, ['checked']] = True
+
+    dataframe.loc[cond1 & cond3, ['checked']] = True
+
+    dataframe.loc[cond1, 'id'] = dataframe.loc[cond1, 'index'].values + 1
+
+    # check division
+    # _2: bac2, _1: bac1 (source bac)
+    merged_df = dataframe.merge(dataframe, left_on=[parent_image_number_col, parent_object_number_col],
+                                right_on=['ImageNumber', 'ObjectNumber'], how='inner', suffixes=('_2', '_1'))
+
+    division = merged_df[merged_df.duplicated(subset='index_1', keep=False)][['index_1']].copy()
+
+    dataframe.loc[division['index_1'].unique(), "divideFlag"] = True
+
+    # other bacteria
+    other_bac_df = dataframe.loc[~ dataframe['checked']]
+
+    temp_df = dataframe.copy()
+    temp_df.index = (temp_df['ImageNumber'].astype(str) + '_' + temp_df['ObjectNumber'].astype(str))
+
+    bac_index_dict = temp_df['index'].to_dict()
+
+    id_list = []
+
+    same_bac_dict = {}
+
+    last_bac_id = dataframe['id'].max() + 1
+
+    for row_index, row in other_bac_df.iterrows():
+
+        image_number, object_number, parent_img_num, parent_obj_num = \
+            row[['ImageNumber', 'ObjectNumber', parent_image_number_col, parent_object_number_col]]
+
+        if str(int(parent_img_num)) + '_' + str(parent_obj_num) not in same_bac_dict.keys():
+            source_link = dataframe.iloc[bac_index_dict[str(int(parent_img_num)) + '_' + str(parent_obj_num)]]
+
+            # life history continues
+            source_bac_id = source_link['id']
+            division_stat = source_link['divideFlag']
+
+        else:
+            source_bac_id, division_stat = same_bac_dict[f"{int(parent_img_num)}_{int(parent_obj_num)}"]
+
+        if division_stat:
+            # division occurs
+            new_bac_id = last_bac_id
+            last_bac_id += 1
+            same_bac_dict[str(int(image_number)) + '_' + str(object_number)] = \
+                [new_bac_id, row['divideFlag']]
+
+            id_list.append(new_bac_id)
+
+        else:
+            id_list.append(source_bac_id)
+
+            # same bacteria
+            same_bac_dict[str(int(image_number)) + '_' + str(object_number)] = \
+                [source_bac_id, row['divideFlag']]
+
+    dataframe.loc[other_bac_df.index, 'id'] = id_list
+
+    dataframe['LifeHistory'] = dataframe.groupby('id')['id'].transform('size')
+
+    # set age
+    dataframe['CellAge'] = dataframe.groupby('id').cumcount() + 1
+
+    dataframe['index'] = dataframe.index.values
+
+    dataframe = dataframe.drop(columns=['checked', 'divideFlag'])
+
+    return dataframe
+
+
 def assign_label_from_nearest_disappeared_bacterium(current_position, previous_positions, disappeared_ids,
                                                     labels_dict, last_occurrence_map):
     """
@@ -525,14 +612,11 @@ def process_simulation_directory(input_directory, cell_type_mapping, output_dire
         # orientation
         df["AreaShape_Orientation"] = - (df["AreaShape_Orientation"] * 180 / np.pi) - 90
 
-    # write to csv
-    df.to_csv(output_directory + "/Objects_properties.csv", index=False)
-
     # now we should check dataframes
     if len(rows_neighbors) == 0 or find_neighbors:
         # This means that the neighbors were not found in the CellModeler
         print('Finding Neighbors')
-        df_neighbors = neighbor_finders(input_directory)
+        df_neighbors = neighbor_finders(df)
     else:
         df_neighbors = pd.DataFrame(rows_neighbors, columns=['Image Number', 'First Object id',
                                                              'Second Object id'])
@@ -562,4 +646,12 @@ def process_simulation_directory(input_directory, cell_type_mapping, output_dire
     findl_df_neighbors.insert(0, 'Relationship', 'Neighbors')
     findl_df_neighbors.insert(3, 'Second Image Number', findl_df_neighbors['First Image Number'].values)
 
+    df['ImageNumber'] = df['ImageNumber'].astype(int)
+    df['id'] = df['id'].astype(int)
+    df = reassign_id(df, 'TrackObjects_ParentImageNumber_50',
+                     'TrackObjects_ParentObjectNumber_50')
+    df = df.drop('index', axis=1)
+
+    # write to csv
+    df.to_csv(output_directory + "/Objects_properties.csv", index=False)
     findl_df_neighbors.to_csv(output_directory + "/Object_relationships.csv", index=False)
