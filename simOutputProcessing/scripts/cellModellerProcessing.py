@@ -308,7 +308,7 @@ def extract_bacterial_features(current_time_step_num, current_time_step_bac, pre
     bac_features_dict['AreaShape_Center_X'].extend([cs[it].pos[0] for it in bac_it])
     bac_features_dict['AreaShape_Center_Y'].extend([cs[it].pos[1] for it in bac_it])
     bac_features_dict['AreaShape_MajorAxisLength'].extend([cs[it].length for it in bac_it])
-    bac_features_dict['AreaShape_MinorAxisLength'].extend([cs[it].radius for it in bac_it])
+    bac_features_dict['AreaShape_MinorAxisLength'].extend([cs[it].radius * 2 for it in bac_it])
 
     bac_features_dict['AreaShape_Orientation'].extend([np.arctan2(cs[it].dir[1], cs[it].dir[0]) for it in bac_it])
 
