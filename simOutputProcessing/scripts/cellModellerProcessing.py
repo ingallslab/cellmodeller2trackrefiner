@@ -320,7 +320,7 @@ def extract_bacterial_features(current_time_step_num, current_time_step_bac, pre
     # Surface area of a capsule:
     # S = 2πr(2r + a)
     bac_features_dict['AreaShape_Area'].extend(
-        [2 * np.pi * cs[it].radius * (cs[it].length + 2 * cs[it].radius) for it in bac_it])
+        [np.pi * cs[it].length / 2 * cs[it].radius for it in bac_it])
 
     bac_features_dict['TrackObjects_ParentImageNumber_50'].extend(this_time_step_bac_parent_image_number)
     bac_features_dict['TrackObjects_ParentObjectNumber_50'].extend(this_time_step_bac_parent_obj_number)
@@ -607,6 +607,7 @@ def process_simulation_directory(input_directory, cell_type_mapping, output_dire
         df["Node_x2_x"] /= pixel_per_micron
         df["Node_x1_y"] /= pixel_per_micron
         df["Node_x2_y"] /= pixel_per_micron
+        df["AreaShape_Area"] /= pixel_per_micron ** 2
 
     if cellprofiler_orientation_format:
         # orientation
